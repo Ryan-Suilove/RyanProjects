@@ -62,7 +62,18 @@ ssh-add ~/.ssh/id_ed25519
 
 ---
 
-### **2.5 使用 SSH 克隆仓库**
+### **2.5 配置git使用系统SSH**
+
+```commandline
+git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"
+```
+
+- `core.sshCommand`：指定 Git 使用哪一个 SSH 程序
+- `--global`：对当前用户所有仓库生效
+- `"C:/Windows/System32/OpenSSH/ssh.exe"`：系统自带 OpenSSH，可使用 ssh-agent
+
+
+### **2.6 使用 SSH 克隆仓库**
 
 ```bash
 git clone git@github.com:Ryan-Suilove/RyanProjects.git
