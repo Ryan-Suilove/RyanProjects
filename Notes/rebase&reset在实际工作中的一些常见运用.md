@@ -88,6 +88,9 @@ pick h7i8j9k 添加登录单元测试
 
 将pick修改为所需指令，保存关闭即可进入编辑状态。
 
+如果没有弹出交互页面，可全局设置vscode为git处理器   
+*git config --global core.editor "code --wait"*
+
 常用指令有**edit**（编辑内容）、**drop**（丢弃该commit以及其对应的修改）、**reword**（修改提交的文本说明）、**squash**（与该标记上面的commit合并，如果两个commit不挨着剪切粘贴调整位置即可）
 
 修改完成后进行add并 *git rebase --continue* 即可，若想回到最初可用 *git rebase --abort*
