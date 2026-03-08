@@ -166,9 +166,9 @@ RELATION_SYNONYMS = {
 }
 
 
-class RAGEngineV2:
+class RAGEngineV3:
     def __init__(self,
-                 index_path="faiss_index_v2",
+                 index_path="faiss_index_v3",
                  model_name="shibing624/text2vec-base-chinese",
                  api_url="http://localhost:1234/v1",
                  user_dict_path="user_dict.txt",
@@ -589,46 +589,131 @@ class RAGEngineV2:
         print(f"[DEBUG] Neo4j 检索到 {len(results)} 条关系")
         return neo4j_context
 
-    def filter_core_keywords(self, keywords: list) -> list:
-        """过滤核心关键词，用于向量检索"""
-        # 过滤常见的疑问词和停用词
-        stop_words = {'什么', '怎么', '如何', '为什么', '哪里', '谁', '哪个',
-                      '吗', '呢', '吧', '的', '了', '是', '有', '在', '和',
-                      '与', '或', '但', '如果', '虽然', '因为', '所以', '可以',
-                      '能', '会', '应该', '需要', '请', '帮我', '告诉我', '问'}
+    def search_faiss(self, query: str, k: int = 4) -> str:
+        """在 FAISS 向量库中搜索相关文档（简化版：直接用原始query检索）
 
-        core_keywords = [kw for kw in keywords if kw not in stop_words and len(kw) > 1]
-        print(f"[DEBUG] 核心关键词: {core_keywords}")
-        return core_keywords
+        Args:
+            query: 用户原始问题，直接用于语义检索
+            k: 返回结果数量
+        """
+        # 直接用原始query进行语义检索，不做任何分词处理
+        docs_with_scores = self.vector_db.similarity_search_with_score(query, k=k*2)
 
-    def search_faiss(self, keywords: list, k: int = 3) -> str:
-        """在 FAISS 向量库中搜索相关文档"""
-        # 用关键词组合成查询语句
-        query_text = " ".join(keywords)
+        # 智能重排序（利用header信息和query匹配）
+        docs_with_scores = self._rerank_by_headers_and_query(docs_with_scores, query, k)
 
-        retriever = self.vector_db.as_retriever(search_kwargs={"k": k})
-        docs = retriever.invoke(query_text)
+        print(f"[DEBUG] FAISS 检索到 {len(docs_with_scores)} 条片段")
 
-        print(f"[DEBUG] FAISS 检索到 {len(docs)} 条片段")
-        for i, doc in enumerate(docs):
-            print(f"  - 片段{i}: {doc.page_content[:50]}...")
+        # 格式化输出，利用 metadata 的 header 信息
+        formatted_docs = []
+        for i, (doc, score) in enumerate(docs_with_scores):
+            # 提取 metadata 信息
+            source = doc.metadata.get("source", "未知作品")
+            header_1 = doc.metadata.get("header_1", "")
+            header_2 = doc.metadata.get("header_2", "")
+            header_3 = doc.metadata.get("header_3", "")
 
-        return "\n\n".join(doc.page_content for doc in docs)
+            # 构建标题层级
+            headers = []
+            if header_1:
+                headers.append(header_1)
+            if header_2:
+                headers.append(header_2)
+            if header_3:
+                headers.append(header_3)
+            header_path = " > ".join(headers) if headers else ""
+
+            # 格式化内容
+            content = doc.page_content
+            if header_path:
+                formatted_docs.append(f"【{source}】{header_path}\n{content}")
+            else:
+                formatted_docs.append(f"【{source}】\n{content}")
+
+            print(f"  - 片段{i+1}: [{source}] {header_path or '(无标题)'} (score: {score:.4f})")
+
+        return "\n\n---\n\n".join(formatted_docs)
+
+    def _rerank_by_headers_and_query(self, docs_with_scores: list, query: str, k: int) -> list:
+        """智能重排序：利用header信息和query直接匹配
+
+        核心原则：直接用原始query匹配，保证语义最接近的片段排在前面
+
+        场景覆盖：
+        1. 角色/实体查询：query包含角色名 → 优先匹配header_2/header_3
+        2. 剧情查询：query包含"剧情"、"故事"等 → 优先匹配header_1/header_2
+        3. 人物关系：query包含关系词（如"男朋友"）→ 优先匹配包含关系描述的片段
+        4. 作品概述：query包含作品名但无具体角色 → 优先匹配header_1
+        5. 作品名匹配：source在query中给予加分
+        """
+        if not docs_with_scores:
+            return []
+
+        reranked = []
+        for doc, score in docs_with_scores:
+            boost = 0
+            header_1 = doc.metadata.get("header_1", "")
+            header_2 = doc.metadata.get("header_2", "")
+            header_3 = doc.metadata.get("header_3", "")
+            source = doc.metadata.get("source", "")
+            content = doc.page_content
+
+            # ===== 场景1: 角色/实体查询（query直接匹配header）=====
+            # 检查query中的内容是否出现在header中
+            if header_2 and header_2 in query:
+                boost += 15
+            if header_3 and header_3 in query:
+                boost += 10
+            # 检查header是否出现在query中（反向匹配）
+            if header_2 and query in header_2:
+                boost += 12
+            if header_3 and query in header_3:
+                boost += 8
+            # 内容中包含query的关键部分
+            # 提取query中可能的实体名（简单策略：长度>=2的非虚词片段）
+            if len(query) >= 2:
+                boost += 5
+
+            # ===== 场景2: 剧情/概述查询 =====
+            if any(word in query for word in ["剧情", "故事", "介绍", "概述", "简介", "讲了什么"]):
+                if header_1 and not header_2:
+                    boost += 10
+
+            # ===== 场景3: 人物关系查询 =====
+            relation_words = ["男朋友", "女朋友", "恋人", "喜欢", "关系", "父亲", "母亲", "兄弟", "姐妹", "朋友", "敌人"]
+            if any(word in query for word in relation_words):
+                if any(word in content for word in relation_words):
+                    boost += 8
+
+            # ===== 场景4: 声优/制作查询 =====
+            if any(word in query for word in ["声优", "配音", "CV", "作者", "制作"]):
+                if any(word in header_1 + header_2 for word in ["声优", "配音", "制作", "STAFF", "作者"]):
+                    boost += 12
+
+            # ===== 场景5: 作品名匹配（source在query中）=====
+            if source and source in query:
+                boost += 10
+            elif source and query in source:
+                boost += 6
+
+            # 计算最终分数（向量相似度分数越小越相似，所以用减法）
+            final_score = score - boost * 0.1
+            reranked.append((doc, final_score, boost))
+
+        # 按调整后分数排序，取前k个
+        reranked.sort(key=lambda x: x[1])
+        return [(doc, score) for doc, score, _ in reranked[:k]]
 
     def invoke(self, query: str) -> str:
-        """双路并行检索并生成回答（改进版）"""
-        # 1. 使用改进的关键词提取（区分实体和关系关键词）
+        """双路并行检索并生成回答（简化版）"""
+        # 1. 提取关键词用于 Neo4j 检索（FAISS 不再使用关键词）
         entity_keywords, relation_keywords, query_type = self.extract_keywords_with_relations(query)
 
-        # 2. 过滤核心关键词（用于向量检索）
-        core_keywords = self.filter_core_keywords(entity_keywords) if entity_keywords else []
-
-        # 3. 并行检索（这里顺序执行，实际可改为并发）
-        # Neo4j 检索（使用全部分词结果）
+        # 2. Neo4j 检索（使用关键词）
         neo4j_context = self.search_neo4j(entity_keywords, relation_keywords, query_type)
 
-        # FAISS 检索（使用过滤后的核心关键词）
-        faiss_context = self.search_faiss(core_keywords) if core_keywords else self.search_faiss(entity_keywords)
+        # 3. FAISS 检索（直接用原始query，不做分词）
+        faiss_context = self.search_faiss(query=query)
 
         # 4. 合并上下文
         combined_context = self._merge_contexts(neo4j_context, faiss_context)
@@ -678,7 +763,7 @@ A同学的回答：""")
 
 # 测试入口
 if __name__ == "__main__":
-    engine = RAGEngineV2()
+    engine = RAGEngineV3()
 
     test_questions = [
         "鲁迪乌斯是谁？",
